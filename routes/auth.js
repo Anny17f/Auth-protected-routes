@@ -1,10 +1,12 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
-const User = require('../models/User');
-const router = express.Router();
 const nodemailer = require('nodemailer');
+const User = require('../models/User');
+const UserToken = require('../models/UserToken');
+const router = express.Router();
 
 const JWT_SECRET = 'your_jwt_secret';
 
@@ -28,7 +30,7 @@ router.post('/login', async (req, res) => {
   if (!isPasswordValid) {
     return res.status(400).send('Invalid password');
   }
-  const token = jwt.sign({ userId: user._id, email: user.email }, JWT_SECRET);
+  const token = jwt.sign({ userId: user._id, email: user.email }, JWT_SECRET, { expiresIn: '1h' });
   res.json({ token });
 });
 
@@ -39,10 +41,16 @@ router.post('/forgot-password', async (req, res) => {
   if (!user) {
     return res.status(400).send('User not found');
   }
+  
   const resetToken = uuidv4();
-  // Save resetToken and userId in a collection (not implemented here)
+  const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+  
+  await UserToken.create({
+    userId: user._id,
+    token: hashedToken,
+    createdAt: new Date()
+  });
 
-  // Create a transporter
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -58,26 +66,35 @@ router.post('/forgot-password', async (req, res) => {
     text: `You requested a password reset. Use the following token to reset your password: ${resetToken}`,
   };
 
-  // Send email
   transporter.sendMail(mailOptions, (error, info) => {
     if (error) {
       return res.status(500).send('Error sending email');
     }
-    res.json({ resetToken });
+    res.json({ msg: 'Email sent' });
   });
 });
 
 // Reset password route
 router.post('/reset-password', async (req, res) => {
   const { resetToken, newPassword } = req.body;
-  // Find user by resetToken
-  const user = await User.findOne({ /* query to find user by resetToken */ });
-  if (!user) {
-    return res.status(400).send('Invalid token');
+  const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+  
+  const userToken = await UserToken.findOne({ token: hashedToken });
+  if (!userToken) {
+    return res.status(400).send('Invalid or expired token');
   }
+
+  const user = await User.findById(userToken.userId);
+  if (!user) {
+    return res.status(404).send('User not found');
+  }
+
   const hashedPassword = await bcrypt.hash(newPassword, 10);
   user.password = hashedPassword;
   await user.save();
+  
+  await UserToken.deleteOne({ token: hashedToken });
+
   res.send('Password reset successful');
 });
 
